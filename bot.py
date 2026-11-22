@@ -23,7 +23,7 @@ CFG = dict(
     drop_radius=220.0,      # go for a supply drop if this close
     pref_gun=70.0, pref_laser=90.0, pref_lightning=28.0,
     strafe_min=0.35, strafe_max=1.2,
-    retreat_enter=0.40,     # start retreating below this HP fraction
+    retreat_enter=0.00,     # start retreating below this HP fraction
     retreat_exit=0.80,      # resume normal play above this
     retreat_max=25.0,       # give up retreating after this many seconds
     cornered_dist=28.0,     # an enemy this close: fight instead of running
