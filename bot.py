@@ -27,6 +27,9 @@ CFG = dict(
     retreat_exit=0.80,      # resume normal play above this
     retreat_max=25.0,       # give up retreating after this many seconds
     cornered_dist=28.0,     # an enemy this close: fight instead of running
+    farm_until=200.0,       # seconds: roam and collect cubes until this match time
+    farm_cubes=10,          # ...or until we hold this many cubes
+    farm_loot_radius=150.0,
     hold_radius=18.0,       # stand still (silent) this close to the goal when idle
 )
 PICK_ORDER = ["lightning_efficiency", "lightning_chain", "gun_mag", "gun_damage", "plating", "armor",
@@ -246,7 +249,7 @@ def lead(origin, tpos, tvel, speed, iters=3):
 
 
 class Bot:
-    name = "duelist-v2"
+    name = "farmer-v3"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -260,6 +263,10 @@ class Bot:
         self.blacklist = {}
         self.stuck_ref = None
         self.last_target_kind = None
+        self.roam = None
+        self.roam_t = -99.0
+        self.visited = []
+        self.lr = CFG["loot_radius"]
         self.retreat = False
         self.retreat_start = 0.0
         self.retreat_cd = 0.0
@@ -314,6 +321,11 @@ class Bot:
             if dr["holder"] in (None, me["id"]) and dd < CFG["drop_radius"] and dr["lands_in"] < dd / 12 + 8 \
                     and not mechs:
                 goal = dr["pos"][:2]
+        farming = (t < CFG["farm_until"] and me["cubes"] < CFG["farm_cubes"] and in_target and not mechs
+                   and goal == list(obs["zone"]["next_center"]))
+        self.lr = CFG["farm_loot_radius"] if farming else CFG["loot_radius"]
+        if farming:
+            goal = list(self.roam_goal(obs, x, y, t))
         self.nav.request(goal[0], goal[1])
         wp = self.nav.step(x, y)
         gdist = math.dist((x, y), goal)
@@ -353,7 +365,7 @@ class Bot:
                 cands.append((math.dist(m["pos"], me["pos"]), m, "npc"))
             for c in obs["crates"]:
                 cands.append((math.dist(c["pos"], me["pos"]) + 10, dict(c, vel=[0, 0, 0]), "crate"))
-            cands = [c for c in cands if c[0] < CFG["loot_radius"]
+            cands = [c for c in cands if c[0] < self.lr
                      and self.blacklist.get(c[1]["id"], -1) < t]
             if cands and in_target and me["hp"] > 0.5 * me["max_hp"]:
                 cands.sort(key=lambda c: c[0])
@@ -442,7 +454,7 @@ class Bot:
                     act["take"] = loot["id"]
                     if weapons[1] is not None and kinds[1] != loot["kind"]:
                         act["drop"] = 1
-            elif gdist < CFG["hold_radius"] and in_target:
+            elif gdist < CFG["hold_radius"] and in_target and not farming:
                 mvx = mvy = 0.0
             if self.hurt_bearing is not None and t - self.hurt_t < 2.0:
                 aim = [self.hurt_bearing, 0.0]
@@ -517,6 +529,31 @@ class Bot:
                 act["reload"] = True
         return act
 
+    def roam_goal(self, obs, x, y, t):
+        """Pick a waypoint inside the next zone circle, away from places we've already searched."""
+        r = self.roam
+        if r is not None and math.dist((x, y), r) > 25 and t - self.roam_t < 15:
+            return r
+        if r is not None:
+            self.visited.append(r)
+            self.visited = self.visited[-8:]
+        z = obs["zone"]
+        cx, cy = z["next_center"]
+        rad = max(z["next_radius"] - 50, 20)
+        best, bs = None, -1e18
+        for _ in range(40):
+            a, rr = self.rng.uniform(0, 2 * math.pi), rad * math.sqrt(self.rng.random())
+            px, py = cx + rr * math.cos(a), cy + rr * math.sin(a)
+            dme = math.dist((px, py), (x, y))
+            if dme < 40 or dme > 220 or self.nav.blocked[self.nav.cell(px, py)]:
+                continue
+            seen = min((math.dist((px, py), v) for v in self.visited), default=300.0)
+            sc = min(seen, 150.0) - 0.4 * dme
+            if sc > bs:
+                best, bs = (px, py), sc
+        self.roam, self.roam_t = best or (cx, cy), t
+        return self.roam
+
     # ---- sub-behaviours --------------------------------------------
     def stuck(self, t, x, y):
         if self.stuck_ref is None or math.dist(self.stuck_ref[1:], (x, y)) > 3.0:
@@ -528,7 +565,7 @@ class Bot:
         if not in_target:
             return None
         x, y, _ = me["pos"]
-        best, bd = None, CFG["loot_radius"]
+        best, bd = None, self.lr
         for p in obs["pickups"]:
             k = p["kind"]
             held = [WEAPON_RANK.get(q, 0) for q in kinds[1:] if q]
