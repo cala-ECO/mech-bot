@@ -18,7 +18,7 @@ import mechfight as mf
 
 CFG = dict(
     cell=4.0,
-    zone_margin=30.0,       # stay this far inside the circle we are heading for
+    zone_margin=50.0,       # stay this far inside the circle we are heading for
     loot_radius=70.0,       # max detour for loot when nothing hostile is visible
     drop_radius=220.0,      # go for a supply drop if this close
     pref_gun=70.0, pref_laser=90.0, pref_lightning=28.0,
