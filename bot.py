@@ -31,7 +31,7 @@ CFG = dict(
     farm_cubes=10,          # ...or until we hold this many cubes
     farm_loot_radius=150.0,
     hold_radius=18.0,
-    hunt_hp=0.5,            # hunt sounds / last-seen enemies while HP is above this fraction
+    hunt_hp=0.3,            # hunt sounds / last-seen enemies while HP is above this fraction
     chase_boost_gap=35.0,   # boost to close when this much farther than preferred range
        # stand still (silent) this close to the goal when idle
 )
@@ -252,7 +252,7 @@ def lead(origin, tpos, tvel, speed, iters=3):
 
 
 class Bot:
-    name = "hunter-v5"
+    name = "hunter-v6"
 
     def __init__(self, hello):
         cfg = hello["config"]
