@@ -249,7 +249,7 @@ def lead(origin, tpos, tvel, speed, iters=3):
 
 
 class Bot:
-    name = "farmer-v3"
+    name = "farmer-v4"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -264,6 +264,7 @@ class Bot:
         self.stuck_ref = None
         self.last_target_kind = None
         self.roam = None
+        self.obj = None
         self.roam_t = -99.0
         self.visited = []
         self.lr = CFG["loot_radius"]
@@ -316,16 +317,23 @@ class Bot:
         (zcx, zcy), zr, zd = self.zone_info(obs, (x, y))
         in_target = zd < zr - CFG["zone_margin"]
         goal = list(obs["zone"]["next_center"])
+        drop_goal = False
         for dr in obs.get("drops", []):
             dd = math.dist((x, y), dr["pos"][:2])
             if dr["holder"] in (None, me["id"]) and dd < CFG["drop_radius"] and dr["lands_in"] < dd / 12 + 8 \
                     and not mechs:
                 goal = dr["pos"][:2]
+                drop_goal = True
         farming = (t < CFG["farm_until"] and me["cubes"] < CFG["farm_cubes"] and in_target and not mechs
                    and goal == list(obs["zone"]["next_center"]))
         self.lr = CFG["farm_loot_radius"] if farming else CFG["loot_radius"]
         if farming:
             goal = list(self.roam_goal(obs, x, y, t))
+        self.obj = None
+        if not mechs and not drop_goal:
+            self.obj = self.objective(obs, me, kinds, npcs, in_target, t)
+            if self.obj is not None:
+                goal = list(self.obj[1]["pos"][:2])
         self.nav.request(goal[0], goal[1])
         wp = self.nav.step(x, y)
         gdist = math.dist((x, y), goal)
@@ -360,16 +368,8 @@ class Bot:
         if mechs:
             target, tkind = mechs[0], "mech"
         else:
-            cands = []
-            for m in npcs:
-                cands.append((math.dist(m["pos"], me["pos"]), m, "npc"))
-            for c in obs["crates"]:
-                cands.append((math.dist(c["pos"], me["pos"]) + 10, dict(c, vel=[0, 0, 0]), "crate"))
-            cands = [c for c in cands if c[0] < self.lr
-                     and self.blacklist.get(c[1]["id"], -1) < t]
-            if cands and in_target and me["hp"] > 0.5 * me["max_hp"]:
-                cands.sort(key=lambda c: c[0])
-                _, target, tkind = cands[0]
+            if self.obj is not None and self.obj[0] in ("npc", "crate"):
+                target, tkind = self.obj[1], self.obj[0]
 
         mvx, mvy = nvx, nvy
         aim = None
@@ -432,7 +432,7 @@ class Bot:
                 b = math.atan2(tc[1] - y, tc[0] - x)
                 want = 30.0 if tkind == "crate" else 38.0
                 if d > want + 5:
-                    mvx, mvy = math.cos(b), math.sin(b)
+                    mvx, mvy = (nvx, nvy) if d > 60 else (math.cos(b), math.sin(b))
                 elif d < want - 8 and tkind == "npc":
                     mvx, mvy = -math.cos(b) * 0.5, -math.sin(b) * 0.5
                 else:
@@ -441,12 +441,13 @@ class Bot:
                     self.blacklist[target["id"]] = t + 20
         else:
             # ---- idle: loot or head for goal ----
-            loot = self.pick_loot(obs, me, kinds, in_target, t)
+            loot = self.obj[1] if (self.obj is not None and self.obj[0] == "loot") else None
             if loot is not None:
                 lx, ly = loot["pos"][:2]
                 dd = math.dist((x, y), (lx, ly))
-                mvx, mvy = norm(lx - x, ly - y, 1.0)
-                if dd > 1e-6:
+                if dd > 8 and (nvx or nvy):
+                    mvx, mvy = nvx, nvy
+                elif dd > 1e-6:
                     mvx, mvy = (lx - x) / dd, (ly - y) / dd
                 if self.stuck(t, x, y):
                     self.blacklist[loot["id"]] = t + 20
@@ -528,6 +529,32 @@ class Bot:
             if w and w["kind"] == "gun" and w["ammo"] < w["stats"].get("mag", 12) / 2 and w["reload"] == 0:
                 act["reload"] = True
         return act
+
+    def objective(self, obs, me, kinds, npcs, in_target, t):
+        """Nearest worthwhile thing to go get (drone, crate, cube or weapon), or None."""
+        if not in_target:
+            return None
+        x, y, _ = me["pos"]
+        best, bd = None, self.lr
+        if me["hp"] > 0.5 * me["max_hp"]:
+            for m in npcs:
+                if self.blacklist.get(m["id"], -1) >= t:
+                    continue
+                d = math.dist((x, y), m["pos"][:2])
+                if d < bd:
+                    best, bd = ("npc", m), d
+            for c in obs["crates"]:
+                if self.blacklist.get(c["id"], -1) >= t:
+                    continue
+                d = math.dist((x, y), c["pos"][:2]) + 10
+                if d < bd:
+                    best, bd = ("crate", dict(c, vel=[0, 0, 0])), d
+        loot = self.pick_loot(obs, me, kinds, in_target, t)
+        if loot is not None:
+            d = math.dist((x, y), loot["pos"][:2]) - (15 if loot.get("kind") in WEAPON_RANK else 0)
+            if d < bd:
+                best = ("loot", loot)
+        return best
 
     def roam_goal(self, obs, x, y, t):
         """Pick a waypoint inside the next zone circle, away from places we've already searched."""
