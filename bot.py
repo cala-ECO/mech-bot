@@ -19,18 +19,19 @@ import mechfight as mf
 CFG = dict(
     cell=4.0,
     zone_margin=30.0,       # stay this far inside the circle we are heading for
-    loot_radius=110.0,      # max detour for loot when nothing hostile is visible
+    loot_radius=110.0,       # max detour for loot when nothing hostile is visible
     drop_radius=220.0,      # go for a supply drop if this close
     pref_gun=70.0, pref_laser=90.0, pref_lightning=28.0,
     strafe_min=0.35, strafe_max=1.2,
-    retreat_enter=0.30,      # start retreating below this HP fraction
+    retreat_enter=0.0,     # start retreating below this HP fraction
     retreat_exit=0.80,      # resume normal play above this
-    retreat_max=15.0,       # give up retreating after this many seconds
-    cornered_dist=10.0,     # an enemy this close: fight instead of running
+    retreat_max=25.0,       # give up retreating after this many seconds
+    cornered_dist=28.0,     # an enemy this close: fight instead of running
     hold_radius=18.0,       # stand still (silent) this close to the goal when idle
 )
-PICK_ORDER = ["armor", "plating", "nanites", "gun_damage", "gun_rate", "servos", "gyros", "reactor",
-              "capacitor", "gun_mag", "jets", "sensors", "gun_velocity"]
+PICK_ORDER = ["lightning_efficiency", "lightning_chain", "gun_mag", "gun_damage", "plating", "armor",
+              "laser_damage", "gun_rate", "lightning_range", "nanites", "servos", "gyros", "reactor",
+              "capacitor", "laser_charge", "jets", "sensors", "gun_velocity"]
 WEAPON_RANK = {"lightning": 3, "laser": 2, "mortar": 0, "gun": 1}
 
 
@@ -245,7 +246,7 @@ def lead(origin, tpos, tvel, speed, iters=3):
 
 
 class Bot:
-    name = "survivor-v1"
+    name = "duelist-v2"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -303,7 +304,7 @@ class Bot:
 
         mechs = [m for m in obs["mechs"] if m["kind"] == "mech"]
         npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
-        mechs.sort(key=lambda m: math.dist(m["pos"], me["pos"]) + m.get("hp", 1000) / 25.0)
+        mechs.sort(key=lambda m: math.dist(m["pos"], me["pos"]) + m.get("hp", 1000) / 12.0)
         # ---- zone / goal ----
         (zcx, zcy), zr, zd = self.zone_info(obs, (x, y))
         in_target = zd < zr - CFG["zone_margin"]
@@ -378,7 +379,7 @@ class Bot:
             aim = [ayaw, apit]
             yerr = abs(wrap(ayaw - yaw_now))
             perr = abs(apit - pit_now)
-            thr = max(0.02, math.atan(1.8 / max(d, 1)))
+            thr = max(0.02, math.atan(2.2 / max(d, 1)))
             aligned = yerr < thr and perr < thr * 1.5
 
             if gun_i is not None and d < gstat["range"] * 0.92 and aligned:
@@ -448,6 +449,11 @@ class Bot:
                 fire[0] = kinds[0] == "gun"  # blind fire at the attacker
             else:
                 aim = self.sound_aim(obs, x, y) or ([math.atan2(mvy, mvx), 0.0] if abs(mvx) + abs(mvy) > .1 else None)
+
+        if target is None:
+            for w in weapons:
+                if w and w["kind"] == "gun" and w["ammo"] < w["stats"].get("mag", 12) and w["reload"] == 0:
+                    act["reload"] = True
 
         # ---- projectile dodge ----
         dx, dy = self.dodge(obs, x, y, z)
@@ -573,4 +579,5 @@ class Bot:
         return ox, oy
 
 
-mf.run(Bot)
+if __name__ == "__main__":
+    mf.run(Bot)
