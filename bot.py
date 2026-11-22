@@ -19,14 +19,14 @@ import mechfight as mf
 CFG = dict(
     cell=4.0,
     zone_margin=30.0,       # stay this far inside the circle we are heading for
-    loot_radius=160.0,      # max detour for loot when nothing hostile is visible
+    loot_radius=110.0,      # max detour for loot when nothing hostile is visible
     drop_radius=220.0,      # go for a supply drop if this close
     pref_gun=70.0, pref_laser=90.0, pref_lightning=28.0,
     strafe_min=0.35, strafe_max=1.2,
-    retreat_enter=0.0,      # start retreating below this HP fraction
+    retreat_enter=0.30,      # start retreating below this HP fraction
     retreat_exit=0.80,      # resume normal play above this
-    retreat_max=25.0,       # give up retreating after this many seconds
-    cornered_dist=28.0,     # an enemy this close: fight instead of running
+    retreat_max=15.0,       # give up retreating after this many seconds
+    cornered_dist=10.0,     # an enemy this close: fight instead of running
     hold_radius=18.0,       # stand still (silent) this close to the goal when idle
 )
 PICK_ORDER = ["armor", "plating", "nanites", "gun_damage", "gun_rate", "servos", "gyros", "reactor",
