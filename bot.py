@@ -21,7 +21,7 @@ CFG = dict(
     zone_margin=30.0,       # stay this far inside the circle we are heading for
     loot_radius=110.0,       # max detour for loot when nothing hostile is visible
     drop_radius=220.0,      # go for a supply drop if this close
-    pref_gun=50.0, pref_laser=70.0, pref_lightning=25.0,
+    pref_gun=50.0, pref_laser=70.0, pref_lightning=18.0,
     strafe_min=0.35, strafe_max=1.2,
     retreat_enter=0.0,     # start retreating below this HP fraction
     retreat_exit=0.80,      # resume normal play above this
@@ -31,12 +31,12 @@ CFG = dict(
     farm_cubes=10,          # ...or until we hold this many cubes
     farm_loot_radius=150.0,
     hold_radius=18.0,
-    hunt_hp=0.3,            # hunt sounds / last-seen enemies while HP is above this fraction
+    hunt_hp=0.5,            # hunt sounds / last-seen enemies while HP is above this fraction
     chase_boost_gap=35.0,   # boost to close when this much farther than preferred range
        # stand still (silent) this close to the goal when idle
 )
-PICK_ORDER = ["gun_damage", "gun_mag", "lightning_efficiency", "lightning_chain", "gun_rate", "laser_damage",
-              "plating", "armor", "lightning_range", "nanites", "servos", "gyros", "reactor",
+PICK_ORDER = ["lightning_efficiency", "lightning_range", "gun_damage", "gun_mag", "lightning_chain", "gun_rate",
+              "laser_damage", "plating", "armor", "nanites", "servos", "gyros", "reactor",
               "capacitor", "laser_charge", "jets", "sensors", "gun_velocity"]
 WEAPON_RANK = {"lightning": 3, "laser": 2, "mortar": 0, "gun": 1}
 
@@ -252,7 +252,7 @@ def lead(origin, tpos, tvel, speed, iters=3):
 
 
 class Bot:
-    name = "hunter-v6"
+    name = "brawler-v8"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -267,6 +267,7 @@ class Bot:
         self.stuck_ref = None
         self.last_target_kind = None
         self.roam = None
+        self.wpn = None
         self.last_enemy = None
         self.searching = False
         self.roam_t = -99.0
@@ -371,6 +372,7 @@ class Bot:
 
         # ---- pick a target ----
         target, tkind = None, None
+        self.wpn = None
         if mechs:
             target, tkind = mechs[0], "mech"
         else:
@@ -378,10 +380,11 @@ class Bot:
             for m in npcs:
                 cands.append((math.dist(m["pos"], me["pos"]), m, "npc"))
             for c in obs["crates"]:
-                cands.append((math.dist(c["pos"], me["pos"]) + 10, dict(c, vel=[0, 0, 0]), "crate"))
+                cands.append((math.dist(c["pos"], me["pos"]) + (-10 if weapons[1] is None else 10), dict(c, vel=[0, 0, 0]), "crate"))
             cands = [c for c in cands if c[0] < self.lr
                      and self.blacklist.get(c[1]["id"], -1) < t]
-            if cands and in_target and me["hp"] > 0.5 * me["max_hp"]:
+            self.wpn = self.best_weapon(obs, me, kinds, in_target, t)
+            if cands and in_target and me["hp"] > 0.5 * me["max_hp"] and self.wpn is None:
                 cands.sort(key=lambda c: c[0])
                 _, target, tkind = cands[0]
 
@@ -414,7 +417,7 @@ class Bot:
                 act["reload"] = True
             for i, k in enumerate(kinds):
                 w = weapons[i]
-                if k == "lightning" and d < 42 and yerr < 0.35 and me["energy"] > 6:
+                if k == "lightning" and d < w["stats"].get("range", 45) * 0.93 and yerr < 0.35 and me["energy"] > 6:
                     fire[i] = True
                 elif k == "laser" and d < w["stats"].get("range", 280) * 0.9:
                     full = w["stats"].get("charge", 0.75)
@@ -430,6 +433,8 @@ class Bot:
                 pref = CFG["pref_gun"]
                 if "lightning" in kinds:
                     pref = CFG["pref_lightning"]
+                    if "mortar" in target.get("weapons", []):
+                        pref = 12.0  # mortar carriers hurt themselves up close
                 elif "laser" in kinds:
                     pref = CFG["pref_laser"]
                 if t >= self.s_until:
@@ -447,7 +452,7 @@ class Bot:
             else:
                 # drone / crate: close to a comfortable range then hold
                 b = math.atan2(tc[1] - y, tc[0] - x)
-                want = 30.0 if tkind == "crate" else 38.0
+                want = 22.0 if "lightning" in kinds else (30.0 if tkind == "crate" else 38.0)
                 if d > want + 5:
                     mvx, mvy = math.cos(b), math.sin(b)
                 elif d < want - 8 and tkind == "npc":
@@ -458,7 +463,7 @@ class Bot:
                     self.blacklist[target["id"]] = t + 20
         else:
             # ---- idle: loot or head for goal ----
-            loot = self.pick_loot(obs, me, kinds, in_target, t)
+            loot = self.wpn or self.pick_loot(obs, me, kinds, in_target, t)
             if loot is not None:
                 lx, ly = loot["pos"][:2]
                 dd = math.dist((x, y), (lx, ly))
@@ -597,6 +602,23 @@ class Bot:
             self.stuck_ref = (t, x, y)
             return False
         return t - self.stuck_ref[0] > 3.0
+
+    def best_weapon(self, obs, me, kinds, in_target, t):
+        """Nearest lightning pickup (or a laser if we have neither), within reach; None otherwise."""
+        if not in_target or "lightning" in kinds and kinds[1] == "lightning":
+            return None
+        x, y, _ = me["pos"]
+        best, bd = None, 130.0
+        for p in obs["pickups"]:
+            k = p["kind"]
+            if k in kinds or self.blacklist.get(p["id"], -1) > t:
+                continue
+            if not (k == "lightning" or (k == "laser" and "lightning" not in kinds and kinds[1] is None)):
+                continue
+            d = math.dist((x, y), p["pos"][:2])
+            if d < bd:
+                best, bd = dict(p), d
+        return best
 
     def pick_loot(self, obs, me, kinds, in_target, t):
         if not in_target:
