@@ -23,7 +23,10 @@ CFG = dict(
     drop_radius=220.0,      # go for a supply drop if this close
     pref_gun=70.0, pref_laser=90.0, pref_lightning=28.0,
     strafe_min=0.35, strafe_max=1.2,
-    flee_hp_frac=0.0,       # (reserved) retreat threshold
+    retreat_enter=0.40,     # start retreating below this HP fraction
+    retreat_exit=0.80,      # resume normal play above this
+    retreat_max=25.0,       # give up retreating after this many seconds
+    cornered_dist=28.0,     # an enemy this close: fight instead of running
     hold_radius=18.0,       # stand still (silent) this close to the goal when idle
 )
 PICK_ORDER = ["armor", "plating", "nanites", "gun_damage", "gun_rate", "servos", "gyros", "reactor",
@@ -62,6 +65,7 @@ class Nav:
         self.gw = int((self.tn - 1) / c)
         self.gh = int((self.tm - 1) / c)
         self.blocked = bytearray(self.gw * self.gh)
+        self.bld = bytearray(self.gw * self.gh)
         self._raster(w["prisms"])
         self._slopes()
         self.dist = None
@@ -100,6 +104,7 @@ class Nav:
                         px, py = cx + dx, cy + dy
                         if self._inside(px, py, rings[0]) and not any(self._inside(px, py, r) for r in rings[1:]):
                             self.blocked[gy * gw + gx] = 1
+                            self.bld[gy * gw + gx] = 1
                             break
 
     @staticmethod
@@ -122,6 +127,16 @@ class Nav:
                     if abs(self.ground(x + dx, y + dy) - h0) / c > 1.1:
                         self.blocked[gy * gw + gx] = 1
                         break
+
+    def clear(self, x0, y0, x1, y1):
+        """True if no building cell lies on the straight line (2 m steps)."""
+        d = math.hypot(x1 - x0, y1 - y0)
+        n = max(int(d / 2.0), 1)
+        for k in range(1, n):
+            f = k / n
+            if self.bld[self.cell(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f)]:
+                return False
+        return True
 
     def cell(self, x, y):
         return (min(max(int((y - self.y0) / self.c), 0), self.gh - 1) * self.gw
@@ -244,6 +259,11 @@ class Bot:
         self.blacklist = {}
         self.stuck_ref = None
         self.last_target_kind = None
+        self.retreat = False
+        self.retreat_start = 0.0
+        self.retreat_cd = 0.0
+        self.cover = None
+        self.cover_t = -99.0
         sys.setswitchinterval(0.001)
 
     # ---- helpers -------------------------------------------------
@@ -304,6 +324,23 @@ class Bot:
         n = math.hypot(nvx, nvy)
         if n > 1e-6:
             nvx, nvy = nvx / n, nvy / n
+
+        # ---- retreat to heal (regen needs 5 s without dealing or taking damage) ----
+        hpf = me["hp"] / me["max_hp"]
+        threats = [m["pos"][:2] for m in mechs if math.dist(m["pos"], me["pos"]) < 220]
+        hurt_now = any(e["type"] == "damaged" and e.get("weapon") != "zone" for e in obs.get("events", []))
+        if not threats and t - self.hurt_t < 3.0 and self.hurt_bearing is not None:
+            threats = [(x + 60 * math.cos(self.hurt_bearing), y + 60 * math.sin(self.hurt_bearing))]
+        close = bool(mechs) and math.dist(mechs[0]["pos"], me["pos"]) < CFG["cornered_dist"]
+        if self.retreat:
+            if hpf > CFG["retreat_exit"] or t - self.retreat_start > CFG["retreat_max"] or not me["in_zone"]:
+                self.retreat, self.retreat_cd = False, t + 8.0
+        elif hpf < CFG["retreat_enter"] and threats and me["in_zone"] and t >= self.retreat_cd:
+            self.retreat, self.retreat_start, self.cover = True, t, None
+        if self.retreat and threats and not close:
+            r = self.do_retreat(obs, me, act, threats, hurt_now, t, (zcx, zcy), zr, (nvx, nvy), weapons)
+            if r is not None:
+                return r
 
         # ---- pick a target ----
         target, tkind = None, None
@@ -430,6 +467,48 @@ class Bot:
         if aim is not None:
             act["aim"] = aim
         # a held weapon whose slot isn't "fire"-eligible this tick still needs an explicit False for lasers
+        return act
+
+    def do_retreat(self, obs, me, act, threats, hurt_now, t, zc, zr, nav_dir, weapons):
+        x, y, z = me["pos"]
+        nav = self.nav
+        tx = sum(p[0] for p in threats) / len(threats)
+        ty = sum(p[1] for p in threats) / len(threats)
+        hidden_here = all(not nav.clear(p[0], p[1], x, y) for p in threats)
+        if hidden_here:
+            self.cover, self.cover_t = (x, y), t
+        elif self.cover is None or hurt_now or t - self.cover_t > 1.5:
+            best, bc = None, 1e18
+            for r in (14, 24, 36, 48):
+                for k in range(16):
+                    a = k * math.pi / 8
+                    cx, cy = x + r * math.cos(a), y + r * math.sin(a)
+                    if nav.blocked[nav.cell(cx, cy)] or math.dist((cx, cy), zc) > zr - 25:
+                        continue
+                    if not nav.clear(x, y, cx, cy):
+                        continue
+                    if any(nav.clear(p[0], p[1], cx, cy) for p in threats):
+                        continue
+                    cost = r - 0.3 * math.dist((cx, cy), (tx, ty))
+                    if cost < bc:
+                        best, bc = (cx, cy), cost
+            self.cover, self.cover_t = best, t
+        if self.cover is not None:
+            dx, dy = self.cover[0] - x, self.cover[1] - y
+            dd = math.hypot(dx, dy)
+            mv = (0.0, 0.0) if dd < 2.0 else (dx / dd, dy / dd)
+        else:  # nowhere to hide: run away from the threats, drifting toward the safe zone
+            ax, ay = x - tx, y - ty
+            an = math.hypot(ax, ay) or 1.0
+            mv = norm(ax / an + nav_dir[0] * 0.6, ay / an + nav_dir[1] * 0.6, 1.0)
+        ox, oy = self.dodge(obs, x, y, z)
+        mvx, mvy = norm(mv[0] + ox, mv[1] + oy, 1.0)
+        act.update(move=[mvx, mvy], fire=[False, False],
+                   boost=bool((mvx or mvy) and me["energy"] > 40 and not hidden_here),
+                   aim=[math.atan2(ty - y, tx - x), 0.0])
+        for i, w in enumerate(weapons):
+            if w and w["kind"] == "gun" and w["ammo"] < w["stats"].get("mag", 12) / 2 and w["reload"] == 0:
+                act["reload"] = True
         return act
 
     # ---- sub-behaviours --------------------------------------------
