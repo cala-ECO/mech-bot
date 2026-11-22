@@ -21,7 +21,7 @@ CFG = dict(
     zone_margin=30.0,       # stay this far inside the circle we are heading for
     loot_radius=110.0,       # max detour for loot when nothing hostile is visible
     drop_radius=220.0,      # go for a supply drop if this close
-    pref_gun=70.0, pref_laser=90.0, pref_lightning=28.0,
+    pref_gun=50.0, pref_laser=70.0, pref_lightning=25.0,
     strafe_min=0.35, strafe_max=1.2,
     retreat_enter=0.0,     # start retreating below this HP fraction
     retreat_exit=0.80,      # resume normal play above this
@@ -30,10 +30,13 @@ CFG = dict(
     farm_until=200.0,       # seconds: roam and collect cubes until this match time
     farm_cubes=10,          # ...or until we hold this many cubes
     farm_loot_radius=150.0,
-    hold_radius=18.0,       # stand still (silent) this close to the goal when idle
+    hold_radius=18.0,
+    hunt_hp=0.5,            # hunt sounds / last-seen enemies while HP is above this fraction
+    chase_boost_gap=35.0,   # boost to close when this much farther than preferred range
+       # stand still (silent) this close to the goal when idle
 )
-PICK_ORDER = ["lightning_efficiency", "lightning_chain", "gun_mag", "gun_damage", "plating", "armor",
-              "laser_damage", "gun_rate", "lightning_range", "nanites", "servos", "gyros", "reactor",
+PICK_ORDER = ["gun_damage", "gun_mag", "lightning_efficiency", "lightning_chain", "gun_rate", "laser_damage",
+              "plating", "armor", "lightning_range", "nanites", "servos", "gyros", "reactor",
               "capacitor", "laser_charge", "jets", "sensors", "gun_velocity"]
 WEAPON_RANK = {"lightning": 3, "laser": 2, "mortar": 0, "gun": 1}
 
@@ -249,7 +252,7 @@ def lead(origin, tpos, tvel, speed, iters=3):
 
 
 class Bot:
-    name = "farmer-v4"
+    name = "hunter-v5"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -264,7 +267,8 @@ class Bot:
         self.stuck_ref = None
         self.last_target_kind = None
         self.roam = None
-        self.obj = None
+        self.last_enemy = None
+        self.searching = False
         self.roam_t = -99.0
         self.visited = []
         self.lr = CFG["loot_radius"]
@@ -329,11 +333,13 @@ class Bot:
         self.lr = CFG["farm_loot_radius"] if farming else CFG["loot_radius"]
         if farming:
             goal = list(self.roam_goal(obs, x, y, t))
-        self.obj = None
-        if not mechs and not drop_goal:
-            self.obj = self.objective(obs, me, kinds, npcs, in_target, t)
-            if self.obj is not None:
-                goal = list(self.obj[1]["pos"][:2])
+        if mechs:
+            self.last_enemy = (mechs[0]["pos"][:2], t)
+        searching = False
+        if (not farming and not mechs and in_target and not drop_goal
+                and math.dist((x, y), obs["zone"]["next_center"]) < CFG["hold_radius"] * 1.5):
+            goal = list(self.roam_goal(obs, x, y, t))
+            searching = True
         self.nav.request(goal[0], goal[1])
         wp = self.nav.step(x, y)
         gdist = math.dist((x, y), goal)
@@ -368,8 +374,16 @@ class Bot:
         if mechs:
             target, tkind = mechs[0], "mech"
         else:
-            if self.obj is not None and self.obj[0] in ("npc", "crate"):
-                target, tkind = self.obj[1], self.obj[0]
+            cands = []
+            for m in npcs:
+                cands.append((math.dist(m["pos"], me["pos"]), m, "npc"))
+            for c in obs["crates"]:
+                cands.append((math.dist(c["pos"], me["pos"]) + 10, dict(c, vel=[0, 0, 0]), "crate"))
+            cands = [c for c in cands if c[0] < self.lr
+                     and self.blacklist.get(c[1]["id"], -1) < t]
+            if cands and in_target and me["hp"] > 0.5 * me["max_hp"]:
+                cands.sort(key=lambda c: c[0])
+                _, target, tkind = cands[0]
 
         mvx, mvy = nvx, nvy
         aim = None
@@ -422,17 +436,20 @@ class Bot:
                     self.sdir = -self.sdir if self.rng.random() < 0.7 else self.sdir
                     self.s_until = t + self.rng.uniform(CFG["strafe_min"], CFG["strafe_max"])
                 b = math.atan2(tc[1] - y, tc[0] - x)
-                rad = max(-1.0, min(1.0, (d - pref) / 25.0))
+                rad = max(-1.0, min(1.0, (d - pref) / 20.0))
                 sx, sy = -math.sin(b) * self.sdir, math.cos(b) * self.sdir
                 navw = 0.15 if in_target else 1.0
-                mvx = sx * 0.9 + math.cos(b) * rad * 0.7 + nvx * navw
-                mvy = sy * 0.9 + math.sin(b) * rad * 0.7 + nvy * navw
+                wounded = target.get("hp", 1e9) < 0.4 * target.get("max_hp", 1400)
+                if me["energy"] > 40 and (d > pref + CFG["chase_boost_gap"] or (wounded and d > 25)):
+                    boost = True
+                mvx = sx * 0.8 + math.cos(b) * rad * 1.0 + nvx * navw
+                mvy = sy * 0.8 + math.sin(b) * rad * 1.0 + nvy * navw
             else:
                 # drone / crate: close to a comfortable range then hold
                 b = math.atan2(tc[1] - y, tc[0] - x)
                 want = 30.0 if tkind == "crate" else 38.0
                 if d > want + 5:
-                    mvx, mvy = (nvx, nvy) if d > 60 else (math.cos(b), math.sin(b))
+                    mvx, mvy = math.cos(b), math.sin(b)
                 elif d < want - 8 and tkind == "npc":
                     mvx, mvy = -math.cos(b) * 0.5, -math.sin(b) * 0.5
                 else:
@@ -441,13 +458,12 @@ class Bot:
                     self.blacklist[target["id"]] = t + 20
         else:
             # ---- idle: loot or head for goal ----
-            loot = self.obj[1] if (self.obj is not None and self.obj[0] == "loot") else None
+            loot = self.pick_loot(obs, me, kinds, in_target, t)
             if loot is not None:
                 lx, ly = loot["pos"][:2]
                 dd = math.dist((x, y), (lx, ly))
-                if dd > 8 and (nvx or nvy):
-                    mvx, mvy = nvx, nvy
-                elif dd > 1e-6:
+                mvx, mvy = norm(lx - x, ly - y, 1.0)
+                if dd > 1e-6:
                     mvx, mvy = (lx - x) / dd, (ly - y) / dd
                 if self.stuck(t, x, y):
                     self.blacklist[loot["id"]] = t + 20
@@ -455,7 +471,10 @@ class Bot:
                     act["take"] = loot["id"]
                     if weapons[1] is not None and kinds[1] != loot["kind"]:
                         act["drop"] = 1
-            elif gdist < CFG["hold_radius"] and in_target and not farming:
+            elif me["hp"] > CFG["hunt_hp"] * me["max_hp"] and in_target and not farming and self.hunt_dir(obs, x, y, t):
+                hd = self.hunt_dir(obs, x, y, t)
+                mvx, mvy = hd
+            elif gdist < CFG["hold_radius"] and in_target and not farming and not searching:
                 mvx = mvy = 0.0
             if self.hurt_bearing is not None and t - self.hurt_t < 2.0:
                 aim = [self.hurt_bearing, 0.0]
@@ -530,31 +549,22 @@ class Bot:
                 act["reload"] = True
         return act
 
-    def objective(self, obs, me, kinds, npcs, in_target, t):
-        """Nearest worthwhile thing to go get (drone, crate, cube or weapon), or None."""
-        if not in_target:
-            return None
-        x, y, _ = me["pos"]
-        best, bd = None, self.lr
-        if me["hp"] > 0.5 * me["max_hp"]:
-            for m in npcs:
-                if self.blacklist.get(m["id"], -1) >= t:
-                    continue
-                d = math.dist((x, y), m["pos"][:2])
-                if d < bd:
-                    best, bd = ("npc", m), d
-            for c in obs["crates"]:
-                if self.blacklist.get(c["id"], -1) >= t:
-                    continue
-                d = math.dist((x, y), c["pos"][:2]) + 10
-                if d < bd:
-                    best, bd = ("crate", dict(c, vel=[0, 0, 0])), d
-        loot = self.pick_loot(obs, me, kinds, in_target, t)
-        if loot is not None:
-            d = math.dist((x, y), loot["pos"][:2]) - (15 if loot.get("kind") in WEAPON_RANK else 0)
-            if d < bd:
-                best = ("loot", loot)
-        return best
+    def hunt_dir(self, obs, x, y, t):
+        """Unit vector toward the freshest nearby combat sound, else the last-seen enemy, else None."""
+        best = None
+        for s in obs.get("sounds", []):
+            if s["kind"] in ("gun", "laser", "laser_charge", "lightning", "mortar", "explosion", "step", "boost") \
+                    and s["dist"] in ("near", "mid") and s["age"] < 1.5:
+                if best is None or (s["dist"] == "near" and best["dist"] != "near"):
+                    best = s
+        if best is not None:
+            return math.cos(best["bearing"]), math.sin(best["bearing"])
+        if self.last_enemy is not None and t - self.last_enemy[1] < 8.0:
+            ex, ey = self.last_enemy[0]
+            d = math.hypot(ex - x, ey - y)
+            if d > 12:
+                return (ex - x) / d, (ey - y) / d
+        return None
 
     def roam_goal(self, obs, x, y, t):
         """Pick a waypoint inside the next zone circle, away from places we've already searched."""
